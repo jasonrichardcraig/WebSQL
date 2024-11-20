@@ -1,9 +1,9 @@
-﻿using System;
+﻿
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml.Linq;
@@ -13,9 +13,9 @@ namespace DeploymentScriptGenerator
     internal class Program
     {
         static readonly HashSet<string> SystemAssemblies = new HashSet<string>
-        {
-            "System", "System.Core", "System.Data", "System.Xml", "System.Numerics", "System.Xml.Linq"
-        };
+            {
+                "System", "System.Core", "System.Data", "System.Xml", "System.Numerics", "System.Xml.Linq"
+            };
 
         static void Main(string[] args)
         {
@@ -67,7 +67,26 @@ namespace DeploymentScriptGenerator
         static List<string> OrderAssembliesByDependencies(List<string> assemblyPaths)
         {
             var dependencies = new Dictionary<string, List<string>>();
-            var assemblyMap = assemblyPaths.ToDictionary(Path.GetFileNameWithoutExtension, path => path);
+            var assemblyMap = assemblyPaths.ToDictionary(path => Path.GetFileNameWithoutExtension(path), path => path);
+
+            // Mapping from full assembly names to paths for resolving dependencies
+            var fullNameAssemblyMap = assemblyPaths.ToDictionary(
+                path => AssemblyName.GetAssemblyName(path).FullName,
+                path => path,
+                StringComparer.OrdinalIgnoreCase);
+
+            // Event handler for resolving dependencies in reflection-only context
+            ResolveEventHandler resolveEventHandler = (sender, args) =>
+            {
+                if (fullNameAssemblyMap.TryGetValue(args.Name, out var assemblyPath))
+                {
+                    return Assembly.ReflectionOnlyLoadFrom(assemblyPath);
+                }
+                // Attempt to load from GAC or standard locations
+                return Assembly.ReflectionOnlyLoad(args.Name);
+            };
+
+            AppDomain.CurrentDomain.ReflectionOnlyAssemblyResolve += resolveEventHandler;
 
             foreach (var path in assemblyPaths)
             {
@@ -76,7 +95,8 @@ namespace DeploymentScriptGenerator
 
                 try
                 {
-                    var assembly = Assembly.LoadFile(path);
+                    var assembly = Assembly.ReflectionOnlyLoadFrom(path);
+
                     var referencedNames = assembly.GetReferencedAssemblies()
                                                   .Select(a => a.Name)
                                                   .Where(name => assemblyMap.ContainsKey(name));
@@ -88,6 +108,8 @@ namespace DeploymentScriptGenerator
                     Console.WriteLine($"Warning: Failed to load assembly '{assemblyName}' for dependency analysis: {ex.Message}");
                 }
             }
+
+            AppDomain.CurrentDomain.ReflectionOnlyAssemblyResolve -= resolveEventHandler;
 
             return TopologicalSort(dependencies).Select(name => assemblyMap[name]).ToList();
         }
@@ -169,20 +191,20 @@ namespace DeploymentScriptGenerator
                 Console.WriteLine("GO");
                 Console.WriteLine($"-- SQL Script for asymmetric key: {keyName} --");
                 Console.WriteLine($@"
-                                    CREATE ASYMMETRIC KEY [{keyName}]
-                                    FROM EXECUTABLE FILE = '{keyPath.Replace("\\", "\\\\")}';
-                                    GO
-                                    CREATE LOGIN [{keyName}Login] FROM ASYMMETRIC KEY [{keyName}];
-                                    GO
-                                    GRANT UNSAFE ASSEMBLY TO [{keyName}Login];
-                                    GO
-                                    USE [WebSQL];
-                                    GO
-                                    CREATE ASSEMBLY [WebSQL_{assemblyName}]
-                                    FROM '{keyPath.Replace("\\", "\\\\")}'
-                                    WITH PERMISSION_SET = UNSAFE;
-                                    GO
-                                    ");
+    CREATE ASYMMETRIC KEY [{keyName}]
+    FROM EXECUTABLE FILE = '{keyPath.Replace("\\", "\\\\")}';
+    GO
+    CREATE LOGIN [{keyName}Login] FROM ASYMMETRIC KEY [{keyName}];
+    GO
+    GRANT UNSAFE ASSEMBLY TO [{keyName}Login];
+    GO
+    USE [WebSQL];
+    GO
+    CREATE ASSEMBLY [WebSQL_{assemblyName}]
+    FROM '{keyPath.Replace("\\", "\\\\")}'
+    WITH PERMISSION_SET = UNSAFE;
+    GO
+    ");
             }
 
             foreach (var group in certificateGroups)
@@ -196,26 +218,26 @@ namespace DeploymentScriptGenerator
                 Console.WriteLine("GO");
                 Console.WriteLine($"-- SQL Script for certificate: {commonCertificateName} --");
                 Console.WriteLine($@"
-                                    CREATE CERTIFICATE [{commonCertificateName}]
-                                    FROM EXECUTABLE FILE = '{paths.First().Replace("\\", "\\\\")}';
-                                    GO
-                                    CREATE LOGIN [{commonCertificateName}Login] FROM CERTIFICATE [{commonCertificateName}];
-                                    GO
-                                    GRANT UNSAFE ASSEMBLY TO [{commonCertificateName}Login];
-                                    GO
-                                    ");
+    CREATE CERTIFICATE [{commonCertificateName}]
+    FROM EXECUTABLE FILE = '{paths.First().Replace("\\", "\\\\")}';
+    GO
+    CREATE LOGIN [{commonCertificateName}Login] FROM CERTIFICATE [{commonCertificateName}];
+    GO
+    GRANT UNSAFE ASSEMBLY TO [{commonCertificateName}Login];
+    GO
+    ");
 
                 foreach (var path in paths)
                 {
                     string assemblyName = Path.GetFileNameWithoutExtension(path);
                     Console.WriteLine($@"
-                                        USE [WebSQL];
-                                        GO
-                                        CREATE ASSEMBLY [WebSQL_{assemblyName}]
-                                        FROM '{path.Replace("\\", "\\\\")}'
-                                        WITH PERMISSION_SET = UNSAFE;
-                                        GO
-                                        ");
+    USE [WebSQL];
+    GO
+    CREATE ASSEMBLY [WebSQL_{assemblyName}]
+    FROM '{path.Replace("\\", "\\\\")}'
+    WITH PERMISSION_SET = UNSAFE;
+    GO
+    ");
                 }
             }
         }
